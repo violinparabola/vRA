@@ -1,0 +1,117 @@
+1_formatVersion: 1
+inputs:
+  vcfqdn:
+    title: vCenter FQDN (or IP)
+    type: string
+    description: vCenter server this VM will be deployed to.
+  vmname:
+    type: string
+    title: VM Name
+  vmip:
+    type: string
+    title: VM IP Address
+  vmpassword:
+    type: string
+    title: VM Template Password
+    encrypted: true
+  vcpassword:
+    type: string
+    encrypted: true
+    title: vCenter Password
+  in_vc_username:
+    type: string
+    title: vCenter Username
+  driveinfo:
+    type: array
+    title: Disk Info
+    items:
+      title: disk
+      type: object
+      properties:
+        label:
+          type: string
+          title: Label
+        size:
+          type: integer
+          title: Size
+        letter:
+          type: string
+          title: Letter
+    maxItems: 15
+resources:
+  Test Script:
+    type: Custom.CustomPSScript
+    dependsOn:
+      - Test Machine
+    properties:
+      in_vm_username: dod_admin
+      in_vm_password: '${input.vmpassword}'
+      in_vc_password: '${input.vcpassword}'
+      in_vc_username: '${input.in_vc_username}'
+      in_vc_fqdn: '${input.vcfqdn}'
+      in_vm_name: '${input.vmname}'
+      in_initialSleepSeconds: 10
+      in_script: |
+        Write-Host "`nTest Script`n"
+        Write-Host "Machine Name is: ${input.vmname}`n`n"
+        Write-Host "Machine IP is: ${input.vmip}`n`n"
+        #Move the CDROM to the end...
+        Get-WmiObject -Class Win32_volume -Filter "DriveType=5" | Select-Object -First 1 | Set-WmiInstance -Arguments @{DriveLetter="Z:"}       
+
+        Write-Host "Setting Variables...`n"
+        
+        #takes in array of drive info as a string to PS
+        $driveinfostring = '${input.driveinfo}'
+        
+        #PS to convert string to array
+        $driveinfo = ConvertFrom-JSON $driveinfostring
+
+        #initialize PS hash tables
+        $driveletters = @()
+        $drivesizes   = @()
+        $drivelabels  = @()
+
+        #populate hash tables
+        $driveinfo | ForEach-Object {
+          $driveletters += "$($_.letter)"
+          $drivesizes   += $($_.size)
+          $drivelabel   += "$($_.label)"
+        }
+
+        Write-Host "Finding Uninitialized Disks....`n"
+        #Get all uninitialized disks
+        $rawDisks = Get-Disk | Where-Object PartitionStyle -eq "Raw"
+
+        $driveletters | ForEach-Object {
+           $rawDisk = $rawDisks | Where-Object Size -EQ ($drivesizes[$driveLetters.indexOf($_)] * 1gb) | Select-Object -first 1
+           Write-Host "Initializing $($_) with size of $($rawDisk.Size) and label of $($drivelabels[$driveletters.indexOf($_)])"
+           Initialize-Disk -Number $rawDisk.DiskNumber -PartitionStyle GPT -PassThru | New-Partition -DriveLetter $_ -UseMaximumSize | Format-Volume -FileSystem NTFS -NewFileSystemLabel $drivelabels[$driveletters.indexOf($_)] -Confirm:$false
+           #Remove the disk we just formatted from the array
+           $rawDisks = $rawDisks | Where-Object UniqueId -NE $rawDisk.UniqueId
+        }
+  Cloud_vSphere_Disk_1:
+    type: Cloud.vSphere.Disk
+    allocatePerInstance: true
+    properties:
+      capacityGb: '${input.driveinfo[count.index].size}'
+      count: '${length(input.driveinfo)}'
+  Test Machine:
+    type: Cloud.vSphere.Machine
+    properties:
+      name: '${input.vmname}'
+      image: AGM-2019
+      cpuCount: 2
+      totalMemoryMB: 4096
+      networks:
+        - network: '${resource.DefaultNetwork.id}'
+          address: '${input.vmip}'
+          assignment: static
+          assignIPv6Address: false
+          assignPublicIpAddress: false
+      attachedDisks: '${map_to_object(resource.Cloud_vSphere_Disk_1[*].id, "source")}'
+  DefaultNetwork:
+    type: Cloud.vSphere.Network
+    properties:
+      networkType: existing
+      constraints:
+        - tag: public
